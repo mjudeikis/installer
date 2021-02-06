@@ -11,9 +11,60 @@ import (
 	"github.com/openshift/installer/pkg/asset/ignition/machine"
 	"github.com/openshift/installer/pkg/asset/installconfig"
 	"github.com/openshift/installer/pkg/asset/rhcos"
+	"github.com/openshift/installer/pkg/asset/templates/content/bootkube"
 	"github.com/openshift/installer/pkg/types"
 	awstypes "github.com/openshift/installer/pkg/types/aws"
 )
+
+var aroDNSMasterMachineConfig = `apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  creationTimestamp: null
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-master-aro-dns
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - contents:
+          source: data:text/plain;charset=utf-8;base64,CnJlc29sdi1maWxlPS9ldGMvcmVzb2x2LmNvbmYuZG5zbWFzcQpzdHJpY3Qtb3JkZXIKYWRkcmVzcz0vYXBpLnRlc3QtY2x1c3Rlci50ZXN0LWRvbWFpbi8KYWRkcmVzcz0vYXBpLWludC50ZXN0LWNsdXN0ZXIudGVzdC1kb21haW4vCmFkZHJlc3M9Ly5hcHBzLnRlc3QtY2x1c3Rlci50ZXN0LWRvbWFpbi8KdXNlcj1kbnNtYXNxCmdyb3VwPWRuc21hc3EKbm8taG9zdHMKY2FjaGUtc2l6ZT0wCg==
+        mode: 420
+        overwrite: true
+        path: /etc/dnsmasq.conf
+        user:
+          name: root
+    systemd:
+      units:
+      - contents: |2
+
+          [Unit]
+          Description=DNS caching server.
+          After=network-online.target
+          Before=bootkube.service
+
+          [Service]
+          # ExecStartPre will create a copy of the customer current resolv.conf file and make it upstream DNS.
+          # This file is a product of user DNS settings on the VNET. We will replace this file to point to
+          # dnsmasq instance on the node. dnsmasq will inject certain dns records we need and forward rest of the queries to
+          # resolv.conf.dnsmasq upstream customer dns.
+          ExecStartPre=/bin/bash -c 'if /usr/bin/test -f "/etc/resolv.conf.dnsmasq"; then echo "already replaced resolv.conf.dnsmasq"; else /bin/cp /etc/resolv.conf /etc/resolv.conf.dnsmasq; fi; /bin/sed -ni -e "/^nameserver /!p; \\$$a nameserver $$(ip -f inet -o addr show eth0|cut -d\  -f 7 | cut -d/ -f 1)" /etc/resolv.conf; /usr/sbin/restorecon /etc/resolv.conf'
+          ExecStart=/usr/sbin/dnsmasq -k
+          ExecStopPost=/bin/bash -c '/bin/mv /etc/resolv.conf.dnsmasq /etc/resolv.conf; /usr/sbin/restorecon /etc/resolv.conf'
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        enabled: true
+        name: dnsmasq.service
+  extensions: null
+  fips: false
+  kernelArguments: null
+  kernelType: ""
+  osImageURL: ""
+`
 
 func TestMasterGenerateMachineConfigs(t *testing.T) {
 	cases := []struct {
@@ -23,8 +74,9 @@ func TestMasterGenerateMachineConfigs(t *testing.T) {
 		expectedMachineConfig []string
 	}{
 		{
-			name:           "no key hyperthreading enabled",
-			hyperthreading: types.HyperthreadingEnabled,
+			name:                  "no key hyperthreading enabled",
+			hyperthreading:        types.HyperthreadingEnabled,
+			expectedMachineConfig: []string{aroDNSMasterMachineConfig},
 		},
 		{
 			name:           "key present hyperthreading enabled",
@@ -51,7 +103,7 @@ spec:
   kernelArguments: null
   kernelType: ""
   osImageURL: ""
-`},
+`, aroDNSMasterMachineConfig},
 		},
 		{
 			name:           "no key hyperthreading disabled",
@@ -81,7 +133,7 @@ spec:
   kernelArguments: null
   kernelType: ""
   osImageURL: ""
-`},
+`, aroDNSMasterMachineConfig},
 		},
 		{
 			name:           "key present hyperthreading disabled",
@@ -133,7 +185,7 @@ spec:
   kernelArguments: null
   kernelType: ""
   osImageURL: ""
-`},
+`, aroDNSMasterMachineConfig},
 		},
 	}
 	for _, tc := range cases {
@@ -175,6 +227,7 @@ spec:
 						Data:     []byte("test-ignition"),
 					},
 				},
+				&bootkube.ARODNSConfig{},
 			)
 			master := &Master{}
 			if err := master.Generate(parents); err != nil {
